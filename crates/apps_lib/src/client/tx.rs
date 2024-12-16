@@ -870,9 +870,6 @@ pub async fn submit_become_validator_offline(
                 .1
                 .ref_to()
         });
-    display_line!(namada.io(), "Consensus Public Key: {}", consensus_key);
-    display_line!(namada.io(), "ETH Hot Public Key: {}", eth_hot_pk);
-    display_line!(namada.io(), "ETH Cold Public Key: {}", eth_cold_pk);
 
     // To avoid wallet deadlocks in following operations
     drop(wallet);
@@ -927,11 +924,28 @@ pub async fn submit_become_validator_offline(
     display_line!(namada.io(), "Protocol Public Key: {}", args.protocol_key.unwrap().raw());
     display_line!(namada.io(), "Address {}", args.address);
     display_line!(namada.io(), "Chain ID: {}", args.tx.clone().chain_id.unwrap().as_str());
-   // display_line!(namada.io(), "Signatures: {}", args.tx.clone().signatures);
+    display_line!(namada.io(), "Signing Data");
+    display_line!(namada.io(), "\tOwner: {}", signing_data.clone().owner.unwrap());
+    display_line!(namada.io(), "\tFee Payer: {}", signing_data.clone().fee_payer.raw());
+    display_line!(namada.io(), "\tPublic Keys");
+
+    for k in signing_data.clone().public_keys.iter_mut() {
+        display_line!(namada.io(), "\t\tKey: {}", k.raw());
+    }
+    display_line!(namada.io(), "Signatures");
+
+    for s in args.tx.clone().signatures.iter() {
+        display_line!(namada.io(), "\t\tSig: {}", String::from_utf8(s.clone()).unwrap());
+    }
+    // display_line!(namada.io(), "Signatures: {}", args.tx.clone().signatures);
 
     //if args.tx.dump_tx || args.tx.dump_wrapper_tx {
+    display_line!(namada.io(), "Dumping Unsigned TX");
+
     tx::dump_tx(namada.io(), &args.tx, tx.clone())?;
     //} else {
+    display_line!(namada.io(), "Signing TX");
+
     sign(namada, &mut tx, &args.tx, signing_data).await?;
     let cmt = tx.first_commitments().unwrap().to_owned();
     let wrapper_hash = tx.wrapper_hash();
