@@ -29,8 +29,9 @@ use namada_sdk::wallet::alias::{validator_address, validator_consensus_key};
 use namada_sdk::wallet::{Wallet, WalletIo};
 use namada_sdk::{error, signing, tx, ExtendedViewingKey, Namada};
 use rand::rngs::OsRng;
+use serde::Serialize;
 use tokio::sync::RwLock;
-
+use namada_core::storage::KeySeg;
 use super::rpc;
 use crate::cli::{args, safe_exit};
 use crate::client::tx::signing::{default_sign, SigningTxData};
@@ -869,6 +870,10 @@ pub async fn submit_become_validator_offline(
                 .1
                 .ref_to()
         });
+    display_line!(namada.io(), "Consensus Public Key: {}", consensus_key);
+    display_line!(namada.io(), "ETH Hot Public Key: {}", eth_hot_pk);
+    display_line!(namada.io(), "ETH Cold Public Key: {}", eth_cold_pk);
+
     // To avoid wallet deadlocks in following operations
     drop(wallet);
 
@@ -916,100 +921,107 @@ pub async fn submit_become_validator_offline(
         )))?;
 
     let (mut tx, signing_data) = args.build(namada).await?;
+    display_line!(namada.io(), "Consensus Public Key: {}", args.consensus_key.unwrap().raw());
+    display_line!(namada.io(), "ETH Hot Public Key: {}", args.eth_hot_key.unwrap().raw());
+    display_line!(namada.io(), "ETH Cold Public Key: {}", args.eth_cold_key.unwrap().raw());
+    display_line!(namada.io(), "Protocol Public Key: {}", args.protocol_key.unwrap().raw());
+    display_line!(namada.io(), "Address {}", args.address);
+    display_line!(namada.io(), "Chain ID: {}", args.tx.clone().chain_id.unwrap().as_str());
+   // display_line!(namada.io(), "Signatures: {}", args.tx.clone().signatures);
 
-    if args.tx.dump_tx || args.tx.dump_wrapper_tx {
-        tx::dump_tx(namada.io(), &args.tx, tx)?;
-    } else {
-        sign(namada, &mut tx, &args.tx, signing_data).await?;
-        let cmt = tx.first_commitments().unwrap().to_owned();
-        let wrapper_hash = tx.wrapper_hash();
-        let resp = namada.submit(tx, &args.tx).await?;
+    //if args.tx.dump_tx || args.tx.dump_wrapper_tx {
+    tx::dump_tx(namada.io(), &args.tx, tx.clone())?;
+    //} else {
+    sign(namada, &mut tx, &args.tx, signing_data).await?;
+    let cmt = tx.first_commitments().unwrap().to_owned();
+    let wrapper_hash = tx.wrapper_hash();
+    let resp = namada.submit(tx, &args.tx).await?;
 
-        if args.tx.dry_run || args.tx.dry_run_wrapper {
-            display_line!(
-                namada.io(),
-                "Transaction dry run. No key or addresses have been saved."
-            );
-            safe_exit(0)
-        }
-
-        if resp
-            .is_applied_and_valid(wrapper_hash.as_ref(), &cmt)
-            .is_none()
-        {
-            return Err(error::Error::Tx(error::TxSubmitError::Other(
-                "Transaction failed. No key or addresses have been saved."
-                    .to_string(),
-            )));
-        }
-
-        // add validator address and keys to the wallet
-        let mut wallet = namada.wallet_mut().await;
-        wallet.insert_address(
-            address_alias.normalize(),
-            args.address.clone(),
-            false,
-        );
-        wallet.add_validator_data(args.address.clone(), validator_keys);
-        wallet
-            .save()
-            .unwrap_or_else(|err| edisplay_line!(namada.io(), "{}", err));
-
-        let tendermint_home = config.ledger.cometbft_dir();
-        tendermint_node::write_validator_key(
-            &tendermint_home,
-            &wallet
-                .find_key_by_pk(&consensus_key, None)
-                .expect("unable to find consensus key pair in the wallet"),
-        )
-            .unwrap();
-        // To avoid wallet deadlocks in following operations
-        drop(wallet);
-        tendermint_node::write_validator_state(tendermint_home).unwrap();
-
-        // Write Namada config stuff or figure out how to do the above
-        // tendermint_node things two epochs in the future!!!
-        config.ledger.shell.tendermint_mode = TendermintMode::Validator;
-        config
-            .write(&config.ledger.shell.base_dir, &config.ledger.chain_id, true)
-            .unwrap();
-
-        let pos_params = rpc::query_pos_parameters(namada.client()).await;
-
-        display_line!(namada.io(), "");
+    if args.tx.dry_run || args.tx.dry_run_wrapper {
         display_line!(
             namada.io(),
-            "The keys for validator \"{alias}\" were stored in the wallet:"
+            "Transaction dry run. No key or addresses have been saved."
         );
-        display_line!(
-            namada.io(),
-            "  Validator account key \"{}\"",
-            validator_key_alias
-        );
-        display_line!(
-            namada.io(),
-            "  Consensus key \"{}\"",
-            consensus_key_alias
-        );
-        display_line!(
-            namada.io(),
-            "Your validator address {} has been stored in the wallet with \
-             alias \"{}\".",
-            args.address,
-            address_alias
-        );
-        display_line!(
-            namada.io(),
-            "The ledger node has been setup to use this validator's address \
-             and consensus key."
-        );
-        display_line!(
-            namada.io(),
-            "Your validator will be active in {} epochs. Be sure to restart \
-             your node for the changes to take effect!",
-            pos_params.pipeline_len
-        );
+        safe_exit(0)
     }
+
+    if resp
+        .is_applied_and_valid(wrapper_hash.as_ref(), &cmt)
+        .is_none()
+    {
+        return Err(error::Error::Tx(error::TxSubmitError::Other(
+            "Transaction failed. No key or addresses have been saved."
+                .to_string(),
+        )));
+    }
+
+    // add validator address and keys to the wallet
+    let mut wallet = namada.wallet_mut().await;
+    wallet.insert_address(
+        address_alias.normalize(),
+        args.address.clone(),
+        false,
+    );
+    wallet.add_validator_data(args.address.clone(), validator_keys);
+    wallet
+        .save()
+        .unwrap_or_else(|err| edisplay_line!(namada.io(), "{}", err));
+
+    let tendermint_home = config.ledger.cometbft_dir();
+    tendermint_node::write_validator_key(
+        &tendermint_home,
+        &wallet
+            .find_key_by_pk(&consensus_key, None)
+            .expect("unable to find consensus key pair in the wallet"),
+    )
+        .unwrap();
+    // To avoid wallet deadlocks in following operations
+    drop(wallet);
+    tendermint_node::write_validator_state(tendermint_home).unwrap();
+
+    // Write Namada config stuff or figure out how to do the above
+    // tendermint_node things two epochs in the future!!!
+    config.ledger.shell.tendermint_mode = TendermintMode::Validator;
+    config
+        .write(&config.ledger.shell.base_dir, &config.ledger.chain_id, true)
+        .unwrap();
+
+    let pos_params = rpc::query_pos_parameters(namada.client()).await;
+
+    display_line!(namada.io(), "");
+    display_line!(
+        namada.io(),
+        "The keys for validator \"{alias}\" were stored in the wallet:"
+    );
+    display_line!(
+        namada.io(),
+        "  Validator account key \"{}\"",
+        validator_key_alias
+    );
+    display_line!(
+        namada.io(),
+        "  Consensus key \"{}\"",
+        consensus_key_alias
+    );
+    display_line!(
+        namada.io(),
+        "Your validator address {} has been stored in the wallet with \
+         alias \"{}\".",
+        args.address,
+        address_alias
+    );
+    display_line!(
+        namada.io(),
+        "The ledger node has been setup to use this validator's address \
+         and consensus key."
+    );
+    display_line!(
+        namada.io(),
+        "Your validator will be active in {} epochs. Be sure to restart \
+         your node for the changes to take effect!",
+        pos_params.pipeline_len
+    );
+    //}
     Ok(())
 }
 
