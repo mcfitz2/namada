@@ -176,6 +176,31 @@ impl CliApi {
                         tx::submit_become_validator(&namada, &mut config, args)
                             .await?;
                     }
+                    Sub::TxBecomeValidatorOffline(TxBecomeValidatorOffline(args)) => {
+                        let chain_ctx = ctx.borrow_mut_chain_or_exit();
+                        let ledger_address =
+                            chain_ctx.get(&args.tx.ledger_address);
+                        let client = client.unwrap_or_else(|| {
+                            C::from_tendermint_address(&ledger_address)
+                        });
+                        client.wait_until_node_is_synced(&io).await?;
+                        let args = args.to_sdk(&mut ctx)?;
+                        let cli::context::ChainContext {
+                            wallet,
+                            mut config,
+                            shielded,
+                            native_token,
+                        } = ctx.take_chain_or_exit();
+                        let namada = NamadaImpl::native_new(
+                            client,
+                            wallet,
+                            shielded,
+                            io,
+                            native_token,
+                        );
+                        tx::submit_become_validator_offline(&namada, &mut config, args)
+                            .await?;
+                    }
                     Sub::TxInitValidator(TxInitValidator(args)) => {
                         let chain_ctx = ctx.borrow_mut_chain_or_exit();
                         let ledger_address =

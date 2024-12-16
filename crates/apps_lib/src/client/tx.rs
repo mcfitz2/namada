@@ -757,6 +757,262 @@ pub async fn submit_become_validator(
     Ok(())
 }
 
+pub async fn submit_become_validator_offline(
+    namada: &impl Namada,
+    config: &mut crate::config::Config,
+    args: args::TxBecomeValidator,
+) -> Result<(), error::Error> {
+    let alias = args
+        .tx
+        .initialized_account_alias
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| "validator".to_string());
+
+    let validator_key_alias = format!("{}-key", alias);
+    let consensus_key_alias = validator_consensus_key(&alias.clone().into());
+    let protocol_key_alias = format!("{}-protocol-key", alias);
+    let eth_hot_key_alias = format!("{}-eth-hot-key", alias);
+    let eth_cold_key_alias = format!("{}-eth-cold-key", alias);
+    let address_alias = validator_address(&alias.clone().into());
+
+    let mut wallet = namada.wallet_mut().await;
+    let consensus_key = args
+        .consensus_key
+        .clone()
+        .map(|key| match key {
+            common::PublicKey::Ed25519(_) => key,
+            common::PublicKey::Secp256k1(_) => {
+                edisplay_line!(
+                    namada.io(),
+                    "Consensus key can only be ed25519"
+                );
+                safe_exit(1)
+            }
+        })
+        .unwrap_or_else(|| {
+            display_line!(namada.io(), "Generating consensus key...");
+            let password =
+                read_and_confirm_encryption_password(args.unsafe_dont_encrypt);
+            wallet
+                .gen_store_secret_key(
+                    // Note that TM only allows ed25519 for consensus key
+                    SchemeType::Ed25519,
+                    Some(consensus_key_alias.clone().into()),
+                    args.tx.wallet_alias_force,
+                    password,
+                    &mut OsRng,
+                )
+                .expect("Key generation should not fail.")
+                .1
+                .ref_to()
+        });
+
+    let eth_cold_pk = args
+        .eth_cold_key
+        .clone()
+        .map(|key| match key {
+            common::PublicKey::Secp256k1(_) => key,
+            common::PublicKey::Ed25519(_) => {
+                edisplay_line!(
+                    namada.io(),
+                    "Eth cold key can only be secp256k1"
+                );
+                safe_exit(1)
+            }
+        })
+        .unwrap_or_else(|| {
+            display_line!(namada.io(), "Generating Eth cold key...");
+            let password =
+                read_and_confirm_encryption_password(args.unsafe_dont_encrypt);
+            wallet
+                .gen_store_secret_key(
+                    // Note that ETH only allows secp256k1
+                    SchemeType::Secp256k1,
+                    Some(eth_cold_key_alias.clone()),
+                    args.tx.wallet_alias_force,
+                    password,
+                    &mut OsRng,
+                )
+                .expect("Key generation should not fail.")
+                .1
+                .ref_to()
+        });
+
+    let eth_hot_pk = args
+        .eth_hot_key
+        .clone()
+        .map(|key| match key {
+            common::PublicKey::Secp256k1(_) => key,
+            common::PublicKey::Ed25519(_) => {
+                edisplay_line!(
+                    namada.io(),
+                    "Eth hot key can only be secp256k1"
+                );
+                safe_exit(1)
+            }
+        })
+        .unwrap_or_else(|| {
+            display_line!(namada.io(), "Generating Eth hot key...");
+            let password =
+                read_and_confirm_encryption_password(args.unsafe_dont_encrypt);
+            wallet
+                .gen_store_secret_key(
+                    // Note that ETH only allows secp256k1
+                    SchemeType::Secp256k1,
+                    Some(eth_hot_key_alias.clone()),
+                    args.tx.wallet_alias_force,
+                    password,
+                    &mut OsRng,
+                )
+                .expect("Key generation should not fail.")
+                .1
+                .ref_to()
+        });
+    // To avoid wallet deadlocks in following operations
+    drop(wallet);
+
+    if args.protocol_key.is_none() {
+        display_line!(namada.io(), "Generating protocol signing key...");
+    }
+
+    // Generate the validator keys
+    let validator_keys = gen_validator_keys(
+        &mut *namada.wallet_mut().await,
+        Some(eth_hot_pk.clone()),
+        args.protocol_key.clone(),
+        args.scheme,
+    )
+        .unwrap();
+    let protocol_sk = validator_keys.get_protocol_keypair();
+    let protocol_key = protocol_sk.to_public();
+
+    let args = TxBecomeValidator {
+        consensus_key: Some(consensus_key.clone()),
+        eth_cold_key: Some(eth_cold_pk),
+        eth_hot_key: Some(eth_hot_pk),
+        protocol_key: Some(protocol_key),
+        ..args
+    };
+
+    // Store the protocol key in the wallet so that we can sign the tx with it
+    // to verify ownership
+    display_line!(namada.io(), "Storing protocol key in the wallet...");
+    let password =
+        read_and_confirm_encryption_password(args.unsafe_dont_encrypt);
+    namada
+        .wallet_mut()
+        .await
+        .insert_keypair(
+            protocol_key_alias,
+            args.tx.wallet_alias_force,
+            protocol_sk.clone(),
+            password,
+            None,
+            None,
+        )
+        .ok_or(error::Error::Other(String::from(
+            "Failed to store the keypair.",
+        )))?;
+
+    let (mut tx, signing_data) = args.build(namada).await?;
+
+    if args.tx.dump_tx || args.tx.dump_wrapper_tx {
+        tx::dump_tx(namada.io(), &args.tx, tx)?;
+    } else {
+        sign(namada, &mut tx, &args.tx, signing_data).await?;
+        let cmt = tx.first_commitments().unwrap().to_owned();
+        let wrapper_hash = tx.wrapper_hash();
+        let resp = namada.submit(tx, &args.tx).await?;
+
+        if args.tx.dry_run || args.tx.dry_run_wrapper {
+            display_line!(
+                namada.io(),
+                "Transaction dry run. No key or addresses have been saved."
+            );
+            safe_exit(0)
+        }
+
+        if resp
+            .is_applied_and_valid(wrapper_hash.as_ref(), &cmt)
+            .is_none()
+        {
+            return Err(error::Error::Tx(error::TxSubmitError::Other(
+                "Transaction failed. No key or addresses have been saved."
+                    .to_string(),
+            )));
+        }
+
+        // add validator address and keys to the wallet
+        let mut wallet = namada.wallet_mut().await;
+        wallet.insert_address(
+            address_alias.normalize(),
+            args.address.clone(),
+            false,
+        );
+        wallet.add_validator_data(args.address.clone(), validator_keys);
+        wallet
+            .save()
+            .unwrap_or_else(|err| edisplay_line!(namada.io(), "{}", err));
+
+        let tendermint_home = config.ledger.cometbft_dir();
+        tendermint_node::write_validator_key(
+            &tendermint_home,
+            &wallet
+                .find_key_by_pk(&consensus_key, None)
+                .expect("unable to find consensus key pair in the wallet"),
+        )
+            .unwrap();
+        // To avoid wallet deadlocks in following operations
+        drop(wallet);
+        tendermint_node::write_validator_state(tendermint_home).unwrap();
+
+        // Write Namada config stuff or figure out how to do the above
+        // tendermint_node things two epochs in the future!!!
+        config.ledger.shell.tendermint_mode = TendermintMode::Validator;
+        config
+            .write(&config.ledger.shell.base_dir, &config.ledger.chain_id, true)
+            .unwrap();
+
+        let pos_params = rpc::query_pos_parameters(namada.client()).await;
+
+        display_line!(namada.io(), "");
+        display_line!(
+            namada.io(),
+            "The keys for validator \"{alias}\" were stored in the wallet:"
+        );
+        display_line!(
+            namada.io(),
+            "  Validator account key \"{}\"",
+            validator_key_alias
+        );
+        display_line!(
+            namada.io(),
+            "  Consensus key \"{}\"",
+            consensus_key_alias
+        );
+        display_line!(
+            namada.io(),
+            "Your validator address {} has been stored in the wallet with \
+             alias \"{}\".",
+            args.address,
+            address_alias
+        );
+        display_line!(
+            namada.io(),
+            "The ledger node has been setup to use this validator's address \
+             and consensus key."
+        );
+        display_line!(
+            namada.io(),
+            "Your validator will be active in {} epochs. Be sure to restart \
+             your node for the changes to take effect!",
+            pos_params.pipeline_len
+        );
+    }
+    Ok(())
+}
+
 pub async fn submit_init_validator(
     namada: &impl Namada,
     config: &mut crate::config::Config,

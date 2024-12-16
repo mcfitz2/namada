@@ -247,6 +247,7 @@ pub mod cmds {
                 .subcommand(TxVoteProposal::def().display_order(1))
                 // PoS transactions
                 .subcommand(TxBecomeValidator::def().display_order(2))
+                .subcommand(TxBecomeValidatorOffline::def().display_order(2))
                 .subcommand(TxInitValidator::def().display_order(2))
                 .subcommand(TxUnjailValidator::def().display_order(2))
                 .subcommand(TxDeactivateValidator::def().display_order(2))
@@ -318,6 +319,8 @@ pub mod cmds {
             let tx_init_account = Self::parse_with_ctx(matches, TxInitAccount);
             let tx_become_validator =
                 Self::parse_with_ctx(matches, TxBecomeValidator);
+            let tx_become_validator_offline =
+                Self::parse_with_ctx(matches, TxBecomeValidatorOffline);
             let tx_init_validator =
                 Self::parse_with_ctx(matches, TxInitValidator);
             let tx_unjail_validator =
@@ -407,6 +410,7 @@ pub mod cmds {
                 .or(tx_init_proposal)
                 .or(tx_vote_proposal)
                 .or(tx_become_validator)
+                .or(tx_become_validator_offline)
                 .or(tx_init_validator)
                 .or(tx_commission_rate_change)
                 .or(tx_change_consensus_key)
@@ -499,6 +503,7 @@ pub mod cmds {
         TxUpdateAccount(TxUpdateAccount),
         TxInitAccount(TxInitAccount),
         TxBecomeValidator(TxBecomeValidator),
+        TxBecomeValidatorOffline(TxBecomeValidatorOffline),
         TxInitValidator(TxInitValidator),
         TxCommissionRateChange(TxCommissionRateChange),
         TxChangeConsensusKey(TxChangeConsensusKey),
@@ -1498,7 +1503,26 @@ pub mod cmds {
                 .add_args::<args::TxBecomeValidator<args::CliTypes>>()
         }
     }
+    #[derive(Clone, Debug)]
+    pub struct TxBecomeValidatorOffline(pub args::TxBecomeValidator<args::CliTypes>);
 
+    impl SubCmd for TxBecomeValidatorOffline {
+        const CMD: &'static str = "become-validator-offline";
+
+        fn parse(matches: &ArgMatches) -> Option<Self> {
+            matches.subcommand_matches(Self::CMD).map(|matches| {
+                TxBecomeValidatorOffline(args::TxBecomeValidator::parse(matches))
+            })
+        }
+
+        fn def() -> App {
+            App::new(Self::CMD)
+                .about(wrap!(
+                    "Become a validator with offline signing"
+                ))
+                .add_args::<args::TxBecomeValidator<args::CliTypes>>()
+        }
+    }
     #[derive(Clone, Debug)]
     pub struct TxInitValidator(pub args::TxInitValidator<args::CliTypes>);
 
